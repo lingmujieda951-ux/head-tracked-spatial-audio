@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Web Audio API - HRTF タブ音声キャプチャ対応</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 600px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f9f9f9;
+            color: #333;
+        }
+        .control-group {
+            margin: 15px 0;
+            background: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+        button {
+            padding: 10px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }
+        button:hover { background: #0056b3; }
+        button.active { background: #28a745; }
+        button.stop { background: #dc3545; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .value-display { float: right; color: #666; }
+        .note { font-size: 13px; color: #555; background: #eef6ff; padding: 10px; border-radius: 5px; margin-bottom: 15px; }
+        .error-msg { color: #dc3545; font-size: 13px; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+    <h1>HRTF 3D音声プレーヤー (Web音声キャプチャ対応)</h1>
+    <p>※ヘッドホンを着用し、PC側のサラウンド機能は<strong>オフ</strong>にしてください[cite: 1]。</p>
+    
+    <div class="note">
+        <strong>使い方（必ずローカルサーバー経由で開いてください）：</strong><br>
+        1. 別のタブでYouTubeや音楽サイトを開いて再生しておきます。<br>
+        2. 「Web（タブ）の音声を取り込む」を押し、対象のタブを選択して<strong>「タブの音声を共有」にチェック</strong>を入れて共有します。
+    </div>
+
+    <div class="control-group">
+        <label>1. 音源の選択・取り込み:</label>
+        <div>
+            <button id="captureBtn">Web（タブ）の音声を取り込む</button>
+            <button id="stopBtn" class="stop" disabled>停止する</button>
+        </div>
+        <div id="errorDisplay" class="error-msg"></div>
+        <hr style="border: 0; border-top: 1px solid #eee; margin: 12px 0;">
+        <label style="font-size: 13px; color: #666;">またはローカルファイル (MP3 / WAV):</label>
+        <input type="file" id="audioFile" accept="audio/mp3, audio/wav, audio/*">
+    </div>
+
+    <div class="control-group">
+        <label>2. 自動回転モード:</label>
+        <button id="orbitHBtn" disabled>自動：水平回転</button>
+        <button id="orbitVBtn" disabled>自動：縦回転（上下）</button>
+    </div>
+
+    <div class="control-group">
+        <label>X座標（左右: -が左 / +が右）: <span id="xVal" class="value-display">0</span></label>
+        <input type="range" id="xRange" min="-5" max="5" step="0.1" value="0">
+    </div>
+
+    <div class="control-group">
+        <label>Y座標（上下: -が下 / +が上）: <span id="yVal" class="value-display">0</span></label>
+        <input type="range" id="yRange" min="-5" max="5" step="0.1" value="0">
+    </div>
+
+    <div class="control-group">
+        <label>Z座標（前後: -が前 / +が後ろ）: <span id="zVal" class="value-display">-2</span></label>
+        <input type="range" id="zRange" min="-5" max="5" step="0.1" value="-2">
+    </div>
+
+    <script>
+        let audioCtx = null;
+        let panner = null;
+        let sourceNode = null;
+        let gainNode = null;
+        let mediaStream = null;
+        let isPlaying = false;
+        let animId = null;
+        let orbitMode = 'none';
+
+        const captureBtn = document.getElementById('captureBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const audioFile = document.getElementById('audioFile');
+        const orbitHBtn = document.getElementById('orbitHBtn');
+        const orbitVBtn = document.getElementById('orbitVBtn');
+        const errorDisplay = document.getElementById('errorDisplay');
+
+        const xRange = document.getElementById('xRange');
+        const yRange = document.getElementById('yRange');
+        const zRange = document.getElementById('zRange');
+        
+        const xVal = document.getElementById('xVal');
+        const yVal = document.getElementById('yVal');
+        const zVal = document.getElementById('zVal');
+
+        async function initAudioEngine() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+
+            panner = audioCtx.createPanner();
+            panner.panningModel = 'HRTF';
+            panner.distanceModel = 'inverse';
+            panner.refDistance = 1;
+            panner.maxDistance = 10000;
+            panner.rolloffFactor = 1;
+
+            const listener = audioCtx.listener;
+            if (listener.positionX) {
+                listener.positionX.value = 0;
+                listener.positionY.value = 0;
+                listener.positionZ.value = 0;
+                listener.forwardX.value = 0;
+                listener.forwardY.value = 0;
+                listener.forwardZ.value = -1;
+                listener.upX.value = 0;
+                listener.upY.value = 1;
+                listener.upZ.value = 0;
+            } else {
+                listener.setPosition(0, 0, 0);
+                listener.setOrientation(0, 0, -1, 0, 1, 0);
+            }
+
+            gainNode = audioCtx.createGain();
+            gainNode.gain.setValueAtTime(0.8, audioCtx.currentTime);
+
+            panner.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            updatePannerPosition();
+        }
+
+        captureBtn.addEventListener('click', async () => {
+            errorDisplay.textContent = '';
+            
+            // file:// プロトコルで開かれていないかチェック
+            if (window.location.protocol === 'file:') {
+                errorDisplay.textContent = 'エラー: この機能は file:/// では動作しません。VS Codeの Live Server 等を使い、http://localhost で開いてください。';
+                return;
+            }
+
+            try {
+                stopAudio();
+
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                });
+
+                const audioTracks = mediaStream.getAudioTracks();
+                if (audioTracks.length === 0) {
+                    alert('音声が検出されませんでした。共有ダイアログで「タブの音声を共有」にチェックを入れてください。');
+                    stopAudio();
+                    return;
+                }
+
+                mediaStream.getVideoTracks().forEach(track => track.stop());
+
+                await initAudioEngine();
+
+                sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+                sourceNode.connect(panner);
+
+                audioTracks[0].onended = () => stopAudio();
+
+                setPlayingState(true);
+            } catch (err) {
+                console.error('キャプチャエラー:', err);
+                errorDisplay.textContent = `キャプチャがキャンセルまたは失敗しました: ${err.message}`;
+            }
+        });
+
+        audioFile.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            errorDisplay.textContent = '';
+            stopAudio();
+            const reader = new FileReader();
+            reader.readAsArrayBuffer(file);
+            reader.onload = async () => {
+                try {
+                    await initAudioEngine();
+                    const audioBuffer = await audioCtx.decodeAudioData(reader.result);
+                    
+                    sourceNode = audioCtx.createBufferSource();
+                    sourceNode.buffer = audioBuffer;
+                    sourceNode.loop = true;
+                    sourceNode.connect(panner);
+                    sourceNode.start(0);
+
+                    setPlayingState(true);
+                } catch (err) {
+                    alert('音声の読み込みに失敗しました。');
+                    console.error(err);
+                }
+            };
+        });
+
+        function setPlayingState(playing) {
+            isPlaying = playing;
+            stopBtn.disabled = !playing;
+            orbitHBtn.disabled = !playing;
+            orbitVBtn.disabled = !playing;
+            captureBtn.disabled = playing;
+        }
+
+        function stopAudio() {
+            cancelAnimationFrame(animId);
+            orbitMode = 'none';
+            orbitHBtn.classList.remove('active');
+            orbitVBtn.classList.remove('active');
+
+            if (sourceNode) {
+                try {
+                    if (sourceNode.stop) sourceNode.stop();
+                    sourceNode.disconnect();
+                } catch (e) {}
+                sourceNode = null;
+            }
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            setPlayingState(false);
+        }
+
+        stopBtn.addEventListener('click', stopAudio);
+
+        function setCoords(x, y, z) {
+            xRange.value = x.toFixed(1);
+            yRange.value = y.toFixed(1);
+            zRange.value = z.toFixed(1);
+            updatePannerPosition();
+        }
+
+        function updatePannerPosition() {
+            if (!panner || !audioCtx) return;
+            const x = parseFloat(xRange.value);
+            const y = parseFloat(yRange.value);
+            const z = parseFloat(zRange.value);
+
+            xVal.textContent = x.toFixed(1);
+            yVal.textContent = y.toFixed(1);
+            zVal.textContent = z.toFixed(1);
+
+            if (panner.positionX) {
+                panner.positionX.setValueAtTime(x, audioCtx.currentTime);
+                panner.positionY.setValueAtTime(y, audioCtx.currentTime);
+                panner.positionZ.setValueAtTime(z, audioCtx.currentTime);
+            } else if (panner.setPosition) {
+                panner.setPosition(x, y, z);
+            }
+        }
+
+        function animate() {
+            if (!isPlaying || orbitMode === 'none') return;
+            const t = performance.now() * 0.0015;
+            const radius = 2.0;
+
+            if (orbitMode === 'horizontal') {
+                setCoords(Math.sin(t) * radius, 0, -Math.cos(t) * radius);
+            } else if (orbitMode === 'vertical') {
+                setCoords(0, Math.sin(t) * radius, -Math.cos(t) * radius);
+            }
+            animId = requestAnimationFrame(animate);
+        }
+
+        orbitHBtn.addEventListener('click', () => {
+            orbitMode = (orbitMode === 'horizontal') ? 'none' : 'horizontal';
+            orbitHBtn.classList.toggle('active', orbitMode === 'horizontal');
+            orbitVBtn.classList.remove('active');
+            if (orbitMode !== 'none') animate();
+        });
+
+        orbitVBtn.addEventListener('click', () => {
+            orbitMode = (orbitMode === 'vertical') ? 'none' : 'vertical';
+            orbitVBtn.classList.toggle('active', orbitMode === 'vertical');
+            orbitHBtn.classList.remove('active');
+            if (orbitMode !== 'none') animate();
+        });
+
+        [xRange, yRange, zRange].forEach(el => {
+            el.addEventListener('input', () => {
+                orbitMode = 'none';
+                orbitHBtn.classList.remove('active');
+                orbitVBtn.classList.remove('active');
+                updatePannerPosition();
+            });
+        });
+    </script>
+</body>
+</html>
