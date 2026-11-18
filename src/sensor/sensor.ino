@@ -50,7 +50,8 @@ void loop() {
         float roll  = ypr[2] * 180/M_PI; // 左右の傾き
         float pitch = ypr[1] * 180/M_PI; // 前後の傾き
 
-        float x = (roll / 45.0) * 5.0;   //90度で5ぐらいになる(僕のmpu6050の場合)
+        // 符号をマイナスにすることで、右に傾けたときに左(-X)へ動くように反転
+        float x = -((roll / 45.0) * 5.0);   //90度で5ぐらいになる(僕のmpu6050の場合)
         float y = (pitch / 45.0) * 5.0;
 
         Serial.print("X:");
